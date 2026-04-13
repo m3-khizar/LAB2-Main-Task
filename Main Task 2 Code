@@ -1,0 +1,187 @@
+/* Filename: Lab 2 Main Task 2.cpp
+Author: Musa Khizar
+Date: 13/04/2025
+*/
+
+
+#include "mbed.h"  // used the Mbed library for hardware control
+#include "arm_book_lib.h"
+
+// --- Button inputs (6 buttons = digits 0-5) ---
+DigitalIn btn0(D2);
+DigitalIn btn1(D3);
+DigitalIn btn2(D4);
+DigitalIn btn3(D5);
+DigitalIn btn4(D6);
+DigitalIn btn5(D7);
+
+// --- LED outputs ---
+DigitalOut warningLed(LED1);  // slow blink in warning mode
+DigitalOut lockLed(LED2);     // solid ON in lockdown
+DigitalOut blinkLed(LED3);    // intermittent blink in lockdown
+
+// --- Serial output for PuTTY evidence ---
+static BufferedSerial pc(USBTX, USBRX, 9600);
+
+// --- Passcodes (digits 0-5 map to buttons D2-D7) ---
+int correctCode[4] = {0, 1, 2, 3};  // correct code: D2, D3, D4, D5
+int adminCode[4]   = {5, 5, 5, 5};  // admin code: D7 x4
+
+// --- Counters ---
+int failCount     = 0;
+int lockdownCount = 0;
+
+// Returns which button (0-5) is pressed, -1 if none
+int readButton() {
+    if (btn0) return 0;
+    if (btn1) return 1;
+    if (btn2) return 2;
+    if (btn3) return 3;
+    if (btn4) return 4;
+    if (btn5) return 5;
+    return -1;
+}
+
+// Waits for a button press, debounces, then returns the digit
+int getDigit() {
+    int val = -1;
+    while (val == -1) val = readButton();
+    thread_sleep_for(50);
+    while (readButton() != -1);
+    thread_sleep_for(50);
+    return val;
+}
+
+// Collects 4 button presses into dest[]
+void getCode(int dest[4]) {
+    for (int i = 0; i < 4; i++) {
+        dest[i] = getDigit();
+    }
+}
+
+// Returns true if both 4-digit arrays match
+bool codesMatch(int a[4], int b[4]) {
+    for (int i = 0; i < 4; i++)
+        if (a[i] != b[i]) return false;
+    return true;
+}
+
+// Displays lockdown count in binary on LEDs for 3 seconds
+void showEventLog() {
+    printf("Lockdown count: %d (shown on LEDs in binary)\n", lockdownCount);
+    warningLed = (lockdownCount >> 0) & 1;
+    lockLed    = (lockdownCount >> 1) & 1;
+    blinkLed   = (lockdownCount >> 2) & 1;
+    thread_sleep_for(3000);
+    warningLed = OFF;
+    lockLed    = OFF;
+    blinkLed   = OFF;
+}
+
+int main()
+{
+    // Set all buttons to PullDown (reads 0 when not pressed)
+    btn0.mode(PullDown);
+    btn1.mode(PullDown);
+    btn2.mode(PullDown);
+    btn3.mode(PullDown);
+    btn4.mode(PullDown);
+    btn5.mode(PullDown);
+
+    // Start with all LEDs off
+    warningLed = OFF;
+    lockLed    = OFF;
+    blinkLed   = OFF;
+
+    printf("=== Secure Access System Ready ===\n");
+    printf("Enter 4-digit code using buttons D2-D7\n");
+    printf("Correct code: D2, D3, D4, D5\n\n");
+
+    while (true) {
+
+        // --- NORMAL MODE: wait for 4-digit code entry ---
+        printf("Waiting for code entry...\n");
+        int entered[4];
+        getCode(entered);
+        printf("Code entered: %d %d %d %d\n",
+               entered[0], entered[1], entered[2], entered[3]);
+
+        if (codesMatch(entered, correctCode)) {
+            // Correct - flash all LEDs as confirmation
+            printf(">> Correct code! Access granted.\n\n");
+            failCount = 0;
+            warningLed = ON; lockLed = ON; blinkLed = ON;
+            thread_sleep_for(500);
+            warningLed = OFF; lockLed = OFF; blinkLed = OFF;
+            continue;
+        }
+
+        // Wrong code
+        failCount++;
+        printf(">> Wrong code. Fail count: %d/3\n", failCount);
+
+        if (failCount >= 3) {
+            failCount = 0;
+
+            // --- WARNING MODE: slow blink LED1 for 30 seconds ---
+            printf(">> WARNING MODE: inputs blocked for 30 seconds.\n");
+            int elapsed = 0;
+            while (elapsed < 30000) {
+                warningLed = ON;
+                thread_sleep_for(500);
+                warningLed = OFF;
+                thread_sleep_for(500);
+                elapsed += 1000;
+            }
+            printf(">> Warning period over. One more attempt allowed.\n");
+
+            // One attempt after warning
+            int attempt[4];
+            getCode(attempt);
+            printf("Code entered: %d %d %d %d\n",
+                   attempt[0], attempt[1], attempt[2], attempt[3]);
+
+            if (codesMatch(attempt, correctCode)) {
+                printf(">> Correct code! Access granted.\n\n");
+                continue;
+            }
+
+            // 4th wrong attempt - lockdown
+            lockdownCount++;
+            printf(">> LOCKDOWN MODE activated. Lockdowns so far: %d\n",
+                   lockdownCount);
+            printf(">> Only admin override can unlock the system.\n");
+            lockLed = ON;
+
+            // --- LOCKDOWN MODE: LED3 blinks for 1 minute ---
+            int lockElapsed = 0;
+            while (lockElapsed < 60000) {
+                blinkLed = ON;
+                thread_sleep_for(300);
+                blinkLed = OFF;
+                thread_sleep_for(700);
+                lockElapsed += 1000;
+            }
+
+            // Wait for admin override - all other inputs ignored
+            printf(">> Enter admin code to unlock:\n");
+            bool unlocked = false;
+            while (!unlocked) {
+                int adminAttempt[4];
+                getCode(adminAttempt);
+                if (codesMatch(adminAttempt, adminCode)) {
+                    unlocked = true;
+                } else {
+                    printf(">> Invalid admin code. Try again.\n");
+                }
+            }
+
+            // Reset after admin override
+            printf(">> Admin override accepted! System reset.\n\n");
+            lockLed   = OFF;
+            blinkLed  = OFF;
+            failCount = 0;
+            showEventLog();
+        }
+    }
+}
